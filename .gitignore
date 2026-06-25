@@ -1,0 +1,15 @@
+# Python virtual environments
+.venv/
+__pycache__/
+*.pyc
+
+# Environment variables & API keys
+.env
+
+# IDE settings
+.vscode/
+.idea/
+
+# Local logs and raw data
+logs/
+data/*.csv
