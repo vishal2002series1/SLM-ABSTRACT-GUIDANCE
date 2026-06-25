@@ -47,13 +47,15 @@ def run_experiment():
         baseline_tokens = run_pure_opus_baseline(task)
 
         # 2. Reset Sandbox & Run Hybrid Pipeline
-        with open("sandbox/target_app.py", "w") as f:
-            f.write(task["buggy_code"])
-        with open("sandbox/test_suite.py", "w") as f:
-            f.write(task["test_suite"])
+        # with open("sandbox/target_app.py", "w") as f:
+        #     f.write(task["buggy_code"])
+        # with open("sandbox/test_suite.py", "w") as f:
+        #     f.write(task["test_suite"])
 
         initial_state = {
             "task_description": task["description"],
+            "target_file": "cart.py",
+            "test_code": task.get("test_suite", ""),
             "current_code": task["buggy_code"],
             "last_error": "",
             "iterations": 0,
@@ -62,7 +64,8 @@ def run_experiment():
             "abstract_guidance": "",
             "test_passed": False,
             "metrics_log": [],
-            "local_attempt_failed": False
+            "local_attempt_failed": False,
+            "attempt_history": []
         }
 
         final_output = app.invoke(initial_state)
