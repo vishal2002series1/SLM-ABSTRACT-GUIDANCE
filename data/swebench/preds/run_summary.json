@@ -1,0 +1,10 @@
+[
+  {
+    "instance_id": "pylint-dev__pylint-5859",
+    "produced_patch": true,
+    "cloud_calls": 0,
+    "cloud_tokens": 0,
+    "target_file": "pylint/checkers/misc.py",
+    "note": ""
+  }
+]

@@ -33,6 +33,21 @@ local_slm = ChatOllama(model="gemma4:e4b", temperature=0)
 bedrock_client = boto3.client("bedrock-runtime", region_name="us-east-1")
 CLOUD_MODEL_ID = "us.anthropic.claude-opus-4-8"
 
+# Escalation mode A/B switch (env ESCALATION_MODE):
+#   "abstract" (default): SLM distills the failure into a purely abstract query (no code
+#                         leaves local); Opus reasons from that + the raw symptom.
+#   "direct":             SKIP the SLM abstraction; send Opus the raw symptom + the actual
+#                         code directly. Tests whether the abstraction step is a liability.
+# Note: "direct" sends source to the cloud, trading away the privacy/IP property that
+# "abstract" preserves -- this A/B measures what the abstraction costs vs. buys.
+ESCALATION_MODE = os.environ.get("ESCALATION_MODE", "abstract")
+
+# A/B fairness switch (env FORCE_ESCALATE=1): skip the stochastic autonomous local
+# fix so BOTH arms escalate from the identical buggy starting code. Without this the
+# SLM may solve a task alone in one arm and not the other, confounding the comparison
+# of guidance quality. Off by default (normal hybrid behavior).
+FORCE_ESCALATE = os.environ.get("FORCE_ESCALATE", "0") == "1"
+
 # Shared scope constraints. The agent can ONLY edit the target source file; the test
 # suite is ground truth and the environment is fixed. Stating this prevents the SLM/Opus
 # from chasing unactionable fixes (e.g. "make the test async", "pip install X") and from
@@ -189,6 +204,13 @@ def local_autonomous_fix(state: AgentState) -> Dict[str, Any]:
 
 
 def abstract_problem(state: AgentState) -> Dict[str, Any]:
+    # In "direct" mode we skip the SLM abstraction entirely -- consult_cloud sends
+    # Opus the concrete symptom + code instead. This node becomes a no-op so the
+    # graph topology is unchanged across both A/B arms.
+    if ESCALATION_MODE == "direct":
+        print("\n--- Node: Escalating to Cloud - [direct mode] skipping SLM abstraction ---")
+        return {"abstract_query": ""}
+
     print("\n--- Node: Escalating to Cloud - Abstracting Code Errors ---")
     history_summary = summarize_history(state.get("attempt_history", []))
     prompt = (
@@ -223,26 +245,48 @@ def consult_cloud(state: AgentState) -> Dict[str, Any]:
     else:
         feedback_block = ""
 
-    # #2: send the RAW condensed error too. The abstract query is the SLM's
-    # interpretation, which can be wrong (it hallucinated async in task_07).
-    # The actual symptom lets Opus overrule a misdiagnosis.
     target = state.get("target_file", "cart.py")
     raw_symptom = condense_error(state.get("last_error", ""))
-    prompt = (
-        f"Abstract query (the SLM's interpretation, which MAY be wrong):\n{state['abstract_query']}\n\n"
-        f"ACTUAL test failure symptom (ground truth — trust this over the interpretation):\n{raw_symptom}\n\n"
-        f"{_action_space_rules(target)}\n"
-        f"{feedback_block}"
-        f"Compact log of every approach ALREADY TRIED and the error it left behind:\n"
-        f"{history_summary}\n\n"
-        f"Do NOT repeat any strategy listed above. If the abstract query contradicts the "
-        f"actual symptom or the constraints, diagnose from the symptom instead. "
-        f"Provide a corrected, more specific approach that only changes `sandbox/{target}`. "
-        f"You MUST use strict TOON (Token-Oriented Object Notation). "
-        f"Do not use JSON, markdown, or conversational text. "
-        f"Format strictly as: STRATEGY:<name>|STEPS:<step1>~<step2>|CONSTRAINT:<rule>\n"
-        f"Maximum length: 75 words."
-    )
+
+    if ESCALATION_MODE == "direct":
+        # Direct mode: no SLM abstraction. Give Opus the concrete symptom + the actual
+        # current code so it diagnoses from ground truth. (Sends source to the cloud.)
+        print(f"[Context Sent to Cloud] Mode: DIRECT (symptom + code, no abstraction)")
+        prompt = (
+            f"A unit test is failing. Diagnose from the concrete evidence below.\n\n"
+            f"Task: {state['task_description']}\n\n"
+            f"ACTUAL test failure symptom:\n{raw_symptom}\n\n"
+            f"Current `sandbox/{target}`:\n```python\n{state['current_code']}\n```\n\n"
+            f"{_action_space_rules(target)}\n"
+            f"{feedback_block}"
+            f"Compact log of every approach ALREADY TRIED and the error it left behind:\n"
+            f"{history_summary}\n\n"
+            f"Do NOT repeat any strategy listed above. Provide a corrected, specific approach "
+            f"that only changes `sandbox/{target}`. "
+            f"You MUST use strict TOON (Token-Oriented Object Notation). "
+            f"Do not use JSON, markdown, or conversational text. "
+            f"Format strictly as: STRATEGY:<name>|STEPS:<step1>~<step2>|CONSTRAINT:<rule>\n"
+            f"Maximum length: 75 words."
+        )
+    else:
+        # Abstract mode (default): SLM's abstraction is primary, raw symptom is a
+        # ground-truth check so Opus can overrule a misdiagnosis.
+        print(f"[Context Sent to Cloud] Mode: ABSTRACT (SLM query + symptom)")
+        prompt = (
+            f"Abstract query (the SLM's interpretation, which MAY be wrong):\n{state['abstract_query']}\n\n"
+            f"ACTUAL test failure symptom (ground truth — trust this over the interpretation):\n{raw_symptom}\n\n"
+            f"{_action_space_rules(target)}\n"
+            f"{feedback_block}"
+            f"Compact log of every approach ALREADY TRIED and the error it left behind:\n"
+            f"{history_summary}\n\n"
+            f"Do NOT repeat any strategy listed above. If the abstract query contradicts the "
+            f"actual symptom or the constraints, diagnose from the symptom instead. "
+            f"Provide a corrected, more specific approach that only changes `sandbox/{target}`. "
+            f"You MUST use strict TOON (Token-Oriented Object Notation). "
+            f"Do not use JSON, markdown, or conversational text. "
+            f"Format strictly as: STRATEGY:<name>|STEPS:<step1>~<step2>|CONSTRAINT:<rule>\n"
+            f"Maximum length: 75 words."
+        )
     print(f"[Context Sent to Cloud] Raw symptom: {raw_symptom[:160]}")
     print(f"[Context Sent to Cloud] Prior-attempt digest: {history_summary}")
     if prior_guidance:
@@ -307,6 +351,11 @@ def route_decision(state: AgentState):
         return "complete"
     if state["iterations"] >= state["max_iterations"]:
         return "abort"
+    # A/B fairness: skip the stochastic autonomous local fix so both arms escalate
+    # from the same buggy code. We only skip the FIRST (pre-guidance) local attempt;
+    # post-guidance self-debug still runs (abstract_guidance is set by then).
+    if FORCE_ESCALATE and not state.get("abstract_guidance"):
+        return "escalate_to_cloud"
     if not state["local_attempt_failed"]:
         return "try_local_fix"
     return "escalate_to_cloud"

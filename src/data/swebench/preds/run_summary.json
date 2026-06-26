@@ -1,0 +1,26 @@
+[
+  {
+    "instance_id": "pallets__flask-4045",
+    "produced_patch": true,
+    "cloud_calls": 1,
+    "cloud_tokens": 620,
+    "target_file": "src/flask/app.py",
+    "note": ""
+  },
+  {
+    "instance_id": "psf__requests-2674",
+    "produced_patch": true,
+    "cloud_calls": 0,
+    "cloud_tokens": 0,
+    "target_file": "requests/adapters.py",
+    "note": ""
+  },
+  {
+    "instance_id": "pylint-dev__pylint-5859",
+    "produced_patch": true,
+    "cloud_calls": 0,
+    "cloud_tokens": 0,
+    "target_file": "pylint/config/option.py",
+    "note": ""
+  }
+]
